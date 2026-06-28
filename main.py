@@ -4,6 +4,8 @@ import json
 import os
 import sys
 
+from inventory import Inventory, ItemDrop, DroppedItem, SWORD_ATK_BONUS, SHIELD_HP_BONUS
+
 pygame.init()
 
 SCREEN_W = 640
@@ -34,12 +36,6 @@ BROWN = (140, 90, 50)
 FLOOR_COLOR = (50, 45, 40)
 WALL_COLOR = (90, 80, 70)
 
-SKELETON_SWORD_DROP = 1 / 3
-SLIME_SHIELD_DROP = 1 / 6
-SWORD_ATK_BONUS = 2
-SHIELD_HP_BONUS = 3
-INVENTORY_MAX = 2
-
 SCORE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "highscore.json")
 
 font_small = pygame.font.SysFont("consolas", 16)
@@ -59,29 +55,15 @@ class Player:
         self.atk = 2
         self.gold = 0
         self.floor = 1
-        self.inventory = []
-
-    def recalc_equip_bonus(self):
-        bonus_atk = 0
-        bonus_hp = 0
-        for eq in self.inventory:
-            if eq == "sword":
-                bonus_atk += SWORD_ATK_BONUS
-            elif eq == "shield":
-                bonus_hp += SHIELD_HP_BONUS
-        self.atk = self.base_atk + bonus_atk
-        old_max = self.max_hp
-        self.max_hp = self.base_max_hp + bonus_hp
-        if self.max_hp > old_max:
-            self.hp += self.max_hp - old_max
-        else:
-            self.hp = min(self.hp, self.max_hp)
+        self.inventory = Inventory()
 
     def equip(self, kind):
-        if len(self.inventory) >= INVENTORY_MAX:
-            self.inventory.pop(0)
-        self.inventory.append(kind)
-        self.recalc_equip_bonus()
+        self.inventory.add(kind)
+        self.inventory.apply_to_player(self)
+
+    def reset_equip(self):
+        self.inventory.clear()
+        self.inventory.apply_to_player(self)
 
 
 class Monster:
@@ -270,14 +252,10 @@ class Game:
             self.set_message(f"You hit {m.kind} for {self.player.atk}!")
             if m.hp <= 0:
                 self.monsters.remove(m)
-                drop = None
-                if m.kind == "skeleton" and random.random() < SKELETON_SWORD_DROP:
-                    drop = "sword"
-                elif m.kind == "slime" and random.random() < SLIME_SHIELD_DROP:
-                    drop = "shield"
-                if drop and not self.item_at(m.x, m.y):
-                    self.items.append(Item(drop, m.x, m.y))
-                    self.set_message(f"You killed {m.kind}! Dropped {drop}!")
+                dropped = ItemDrop.try_drop(m.kind, m.x, m.y, self.item_at)
+                if dropped:
+                    self.items.append(dropped)
+                    self.set_message(f"You killed {m.kind}! Dropped {dropped.kind}!")
                 else:
                     self.set_message(f"You killed {m.kind}!")
             self.player.hp -= m.atk
@@ -291,11 +269,11 @@ class Game:
         self.player.y = ny
         it = self.item_at(nx, ny)
         if it:
-            self.auto_pickup(it)
+            self.check_pickup(it)
         else:
             self.monsters_turn()
 
-    def auto_pickup(self, it):
+    def check_pickup(self, it):
         if it.kind == "gold":
             amount = random.randint(1, 5)
             self.player.gold += amount
@@ -306,13 +284,11 @@ class Game:
             self.player.hp = min(self.player.max_hp, self.player.hp + heal)
             self.set_message(f"Drank potion +{heal} HP!")
             self.items.remove(it)
-        elif it.kind == "sword":
-            self.player.equip("sword")
-            self.set_message(f"Equipped sword! ATK +{SWORD_ATK_BONUS}")
-            self.items.remove(it)
-        elif it.kind == "shield":
-            self.player.equip("shield")
-            self.set_message(f"Equipped shield! Max HP +{SHIELD_HP_BONUS}")
+        elif ItemDrop.is_equipment(it.kind):
+            self.player.equip(it.kind)
+            bonus = SWORD_ATK_BONUS if it.kind == "sword" else SHIELD_HP_BONUS
+            stat = "ATK" if it.kind == "sword" else "Max HP"
+            self.set_message(f"Equipped {it.kind}! {stat} +{bonus}")
             self.items.remove(it)
 
     def pickup_key(self):
@@ -324,12 +300,12 @@ class Game:
             return
         it = self.item_at(self.player.x, self.player.y)
         if it:
-            self.auto_pickup(it)
+            self.check_pickup(it)
         else:
             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 it = self.item_at(self.player.x + dx, self.player.y + dy)
                 if it:
-                    self.auto_pickup(it)
+                    self.check_pickup(it)
                     return
             self.set_message("Nothing to pick up.")
 
@@ -390,8 +366,6 @@ class Game:
         self.player = Player(1, 1)
         self.player.gold = save_gold
         self.player.floor = save_floor
-        self.player.inventory = []
-        self.player.recalc_equip_bonus()
         self.state = "playing"
         self.generate_floor(save_floor)
 
@@ -405,6 +379,9 @@ class Game:
         surf = font.render(text, True, color)
         r = surf.get_rect(center=(cx, cy))
         self.screen.blit(surf, r)
+
+    def draw_equipment(self, px, py):
+        self.player.inventory.draw_equipment(self.screen, px, py)
 
     def draw(self):
         self.screen.fill(BLACK)
@@ -448,17 +425,8 @@ class Game:
                 pygame.draw.rect(self.screen, DARK_RED, (rx, ry, 16, 20))
                 pygame.draw.rect(self.screen, RED, (rx + 2, ry + 4, 12, 14))
                 pygame.draw.rect(self.screen, GRAY, (rx + 4, ry - 2, 8, 4))
-            elif it.kind == "sword":
-                bx = MAP_OFFSET_X + it.x * TILE + TILE // 2
-                by = MAP_OFFSET_Y + it.y * TILE + TILE // 2
-                pygame.draw.rect(self.screen, GRAY, (bx - 2, by - 12, 4, 20))
-                pygame.draw.rect(self.screen, DARK_GRAY, (bx - 8, by + 6, 16, 3))
-                pygame.draw.rect(self.screen, BROWN, (bx - 3, by + 9, 6, 5))
-            elif it.kind == "shield":
-                bx = MAP_OFFSET_X + it.x * TILE + TILE // 2
-                by = MAP_OFFSET_Y + it.y * TILE + TILE // 2
-                pygame.draw.polygon(self.screen, BROWN, [(bx - 9, by - 10), (bx + 9, by - 10), (bx + 9, by + 2), (bx, by + 12), (bx - 9, by + 2)])
-                pygame.draw.polygon(self.screen, (100, 60, 30), [(bx - 6, by - 7), (bx + 6, by - 7), (bx + 6, by), (bx, by + 8), (bx - 6, by)])
+            elif ItemDrop.is_equipment(it.kind):
+                ItemDrop.draw_on_map(self.screen, it, MAP_OFFSET_X, MAP_OFFSET_Y, TILE, self.draw_text, font_small)
 
         for m in self.monsters:
             if m.kind == "boss":
@@ -483,23 +451,7 @@ class Game:
         pygame.draw.rect(self.screen, CYAN, (px + 6, py + 6, TILE - 12, TILE - 12))
         self.draw_text("@", font_medium, WHITE, px + TILE // 2, py + TILE // 2)
 
-        slot_w = 14
-        slot_h = 14
-        for i, eq in enumerate(self.player.inventory):
-            sx = px + TILE - 4
-            sy = py - 2 + i * (slot_h + 2)
-            color = GRAY if eq == "sword" else BROWN
-            pygame.draw.rect(self.screen, BLACK, (sx - 1, sy - 1, slot_w + 2, slot_h + 2))
-            pygame.draw.rect(self.screen, color, (sx, sy, slot_w, slot_h))
-            if eq == "sword":
-                pygame.draw.rect(self.screen, WHITE, (sx + slot_w // 2 - 1, sy + 2, 2, slot_h - 5))
-                pygame.draw.rect(self.screen, DARK_GRAY, (sx + 2, sy + slot_h - 5, slot_w - 4, 2))
-            else:
-                pygame.draw.polygon(self.screen, (200, 160, 100), [
-                    (sx + 3, sy + 3), (sx + slot_w - 3, sy + 3),
-                    (sx + slot_w - 3, sy + 7), (sx + slot_w // 2, sy + slot_h - 2),
-                    (sx + 3, sy + 7)
-                ])
+        self.draw_equipment(px + TILE, py)
 
         if self.message_timer > 0:
             surf = font_medium.render(self.message, True, YELLOW)
