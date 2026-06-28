@@ -30,8 +30,15 @@ GOLD = (255, 200, 40)
 ORANGE = (240, 140, 40)
 PURPLE = (180, 60, 200)
 CYAN = (80, 200, 220)
+BROWN = (140, 90, 50)
 FLOOR_COLOR = (50, 45, 40)
 WALL_COLOR = (90, 80, 70)
+
+SKELETON_SWORD_DROP = 1 / 3
+SLIME_SHIELD_DROP = 1 / 6
+SWORD_ATK_BONUS = 2
+SHIELD_HP_BONUS = 3
+INVENTORY_MAX = 2
 
 SCORE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "highscore.json")
 
@@ -45,11 +52,36 @@ class Player:
     def __init__(self, x, y):
         self.x = x
         self.y = y
+        self.base_max_hp = 10
+        self.base_atk = 2
         self.hp = 10
         self.max_hp = 10
         self.atk = 2
         self.gold = 0
         self.floor = 1
+        self.inventory = []
+
+    def recalc_equip_bonus(self):
+        bonus_atk = 0
+        bonus_hp = 0
+        for eq in self.inventory:
+            if eq == "sword":
+                bonus_atk += SWORD_ATK_BONUS
+            elif eq == "shield":
+                bonus_hp += SHIELD_HP_BONUS
+        self.atk = self.base_atk + bonus_atk
+        old_max = self.max_hp
+        self.max_hp = self.base_max_hp + bonus_hp
+        if self.max_hp > old_max:
+            self.hp += self.max_hp - old_max
+        else:
+            self.hp = min(self.hp, self.max_hp)
+
+    def equip(self, kind):
+        if len(self.inventory) >= INVENTORY_MAX:
+            self.inventory.pop(0)
+        self.inventory.append(kind)
+        self.recalc_equip_bonus()
 
 
 class Monster:
@@ -99,6 +131,7 @@ class Game:
         self.high_score = self.load_high_score()
         self.message = ""
         self.message_timer = 0
+        self.pending_next_floor = False
         self.generate_floor(1)
 
     def load_high_score(self):
@@ -173,6 +206,7 @@ class Game:
             if px is not None:
                 self.items.append(Item("potion", px, py))
 
+        self.pending_next_floor = False
         self.set_message(f"Floor {floor_num} - BOSS!" if is_boss_floor else f"Floor {floor_num}")
 
     def find_empty_tile(self, avoid_center=False):
@@ -222,6 +256,10 @@ class Game:
     def try_move_player(self, dx, dy):
         if self.state != "playing":
             return
+        if self.pending_next_floor:
+            self.pending_next_floor = False
+            self.generate_floor(self.player.floor + 1)
+            return
         nx = self.player.x + dx
         ny = self.player.y + dy
         if not self.is_walkable(nx, ny):
@@ -232,7 +270,16 @@ class Game:
             self.set_message(f"You hit {m.kind} for {self.player.atk}!")
             if m.hp <= 0:
                 self.monsters.remove(m)
-                self.set_message(f"You killed {m.kind}!")
+                drop = None
+                if m.kind == "skeleton" and random.random() < SKELETON_SWORD_DROP:
+                    drop = "sword"
+                elif m.kind == "slime" and random.random() < SLIME_SHIELD_DROP:
+                    drop = "shield"
+                if drop and not self.item_at(m.x, m.y):
+                    self.items.append(Item(drop, m.x, m.y))
+                    self.set_message(f"You killed {m.kind}! Dropped {drop}!")
+                else:
+                    self.set_message(f"You killed {m.kind}!")
             self.player.hp -= m.atk
             if self.player.hp <= 0:
                 self.player.hp = 0
@@ -259,9 +306,21 @@ class Game:
             self.player.hp = min(self.player.max_hp, self.player.hp + heal)
             self.set_message(f"Drank potion +{heal} HP!")
             self.items.remove(it)
+        elif it.kind == "sword":
+            self.player.equip("sword")
+            self.set_message(f"Equipped sword! ATK +{SWORD_ATK_BONUS}")
+            self.items.remove(it)
+        elif it.kind == "shield":
+            self.player.equip("shield")
+            self.set_message(f"Equipped shield! Max HP +{SHIELD_HP_BONUS}")
+            self.items.remove(it)
 
     def pickup_key(self):
         if self.state != "playing":
+            return
+        if self.pending_next_floor:
+            self.pending_next_floor = False
+            self.generate_floor(self.player.floor + 1)
             return
         it = self.item_at(self.player.x, self.player.y)
         if it:
@@ -322,13 +381,19 @@ class Game:
                         m.x = tx
                         m.y = ty
                         break
-        if not self.monsters:
-            self.generate_floor(self.player.floor + 1)
+        if not self.monsters and self.player.floor < 10:
+            self.pending_next_floor = True
 
     def restart(self):
-        self.player = None
+        save_gold = self.player.gold if self.player else 0
+        save_floor = self.player.floor if self.player else 1
+        self.player = Player(1, 1)
+        self.player.gold = save_gold
+        self.player.floor = save_floor
+        self.player.inventory = []
+        self.player.recalc_equip_bonus()
         self.state = "playing"
-        self.generate_floor(1)
+        self.generate_floor(save_floor)
 
     def draw_tile_rect(self, x, y, color, inset=0):
         rx = MAP_OFFSET_X + x * TILE + inset
@@ -383,6 +448,17 @@ class Game:
                 pygame.draw.rect(self.screen, DARK_RED, (rx, ry, 16, 20))
                 pygame.draw.rect(self.screen, RED, (rx + 2, ry + 4, 12, 14))
                 pygame.draw.rect(self.screen, GRAY, (rx + 4, ry - 2, 8, 4))
+            elif it.kind == "sword":
+                bx = MAP_OFFSET_X + it.x * TILE + TILE // 2
+                by = MAP_OFFSET_Y + it.y * TILE + TILE // 2
+                pygame.draw.rect(self.screen, GRAY, (bx - 2, by - 12, 4, 20))
+                pygame.draw.rect(self.screen, DARK_GRAY, (bx - 8, by + 6, 16, 3))
+                pygame.draw.rect(self.screen, BROWN, (bx - 3, by + 9, 6, 5))
+            elif it.kind == "shield":
+                bx = MAP_OFFSET_X + it.x * TILE + TILE // 2
+                by = MAP_OFFSET_Y + it.y * TILE + TILE // 2
+                pygame.draw.polygon(self.screen, BROWN, [(bx - 9, by - 10), (bx + 9, by - 10), (bx + 9, by + 2), (bx, by + 12), (bx - 9, by + 2)])
+                pygame.draw.polygon(self.screen, (100, 60, 30), [(bx - 6, by - 7), (bx + 6, by - 7), (bx + 6, by), (bx, by + 8), (bx - 6, by)])
 
         for m in self.monsters:
             if m.kind == "boss":
@@ -406,6 +482,24 @@ class Game:
         pygame.draw.rect(self.screen, BLUE, (px + 2, py + 2, TILE - 4, TILE - 4))
         pygame.draw.rect(self.screen, CYAN, (px + 6, py + 6, TILE - 12, TILE - 12))
         self.draw_text("@", font_medium, WHITE, px + TILE // 2, py + TILE // 2)
+
+        slot_w = 14
+        slot_h = 14
+        for i, eq in enumerate(self.player.inventory):
+            sx = px + TILE - 4
+            sy = py - 2 + i * (slot_h + 2)
+            color = GRAY if eq == "sword" else BROWN
+            pygame.draw.rect(self.screen, BLACK, (sx - 1, sy - 1, slot_w + 2, slot_h + 2))
+            pygame.draw.rect(self.screen, color, (sx, sy, slot_w, slot_h))
+            if eq == "sword":
+                pygame.draw.rect(self.screen, WHITE, (sx + slot_w // 2 - 1, sy + 2, 2, slot_h - 5))
+                pygame.draw.rect(self.screen, DARK_GRAY, (sx + 2, sy + slot_h - 5, slot_w - 4, 2))
+            else:
+                pygame.draw.polygon(self.screen, (200, 160, 100), [
+                    (sx + 3, sy + 3), (sx + slot_w - 3, sy + 3),
+                    (sx + slot_w - 3, sy + 7), (sx + slot_w // 2, sy + slot_h - 2),
+                    (sx + 3, sy + 7)
+                ])
 
         if self.message_timer > 0:
             surf = font_medium.render(self.message, True, YELLOW)
