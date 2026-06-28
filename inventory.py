@@ -24,13 +24,25 @@ class Inventory:
 
     def add(self, kind):
         if kind not in EQUIP_KINDS:
-            return
-        if len(self.slots) >= INVENTORY_MAX:
+            return False
+        while len(self.slots) >= INVENTORY_MAX:
             self.slots.pop(0)
         self.slots.append(kind)
+        if len(self.slots) > INVENTORY_MAX:
+            del self.slots[:len(self.slots) - INVENTORY_MAX]
+        return True
+
+    def is_full(self):
+        return len(self.slots) >= INVENTORY_MAX
+
+    def count(self, kind):
+        return self.slots.count(kind)
 
     def clear(self):
         self.slots.clear()
+
+    def size(self):
+        return len(self.slots)
 
     def calc_atk_bonus(self):
         return sum(SWORD_ATK_BONUS for eq in self.slots if eq == "sword")

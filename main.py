@@ -155,6 +155,7 @@ class Game:
         self.player.floor = floor_num
 
         self.monsters = []
+        self.items.clear()
         self.items = []
 
         is_boss_floor = (floor_num % 3 == 0)
@@ -363,9 +364,15 @@ class Game:
     def restart(self):
         save_gold = self.player.gold if self.player else 0
         save_floor = self.player.floor if self.player else 1
+        if self.items:
+            self.items.clear()
+        if self.monsters:
+            self.monsters.clear()
         self.player = Player(1, 1)
         self.player.gold = save_gold
         self.player.floor = save_floor
+        self.player.inventory.clear()
+        self.player.inventory.apply_to_player(self.player)
         self.state = "playing"
         self.generate_floor(save_floor)
 
